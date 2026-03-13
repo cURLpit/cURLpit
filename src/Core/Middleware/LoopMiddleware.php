@@ -46,8 +46,9 @@ class LoopMiddleware implements MiddlewareInterface
 
     public function process(ServerRequestInterface $request, RequestHandlerInterface $handler): ResponseInterface
     {
-        // Create a fresh context for this loop – inner middleware mutates it
-        $context = new LoopContext();
+        // Use existing context if already set (e.g. by a prepare middleware),
+        // otherwise create a fresh one for this loop.
+        $context = $request->getAttribute('__loop_context') ?? new LoopContext();
         $request = $request->withAttribute('__loop_context', $context);
 
         $body         = '';
