@@ -1,4 +1,4 @@
-# cURLpit (https://github.com/curlpit/curlpit)
+# [cURLpit](https://github.com/curlpit/curlpit)
 
 Curlpit is a PSR-15 middleware orchestrator for PHP – with branching, looping, and declarative flow control built in.
 
