@@ -1,4 +1,4 @@
-# [cURLpit](https://github.com/curlpit/curlpit)
+# cURLpit
 
 Curlpit is a PSR-15 middleware orchestrator for PHP – with branching, looping, and declarative flow control built in.
 
@@ -90,8 +90,9 @@ Operators: `eq`, `neq`, `gt`, `gte`, `lt`, `lte`. Without an operator, truthy ch
 ## Built-in middleware
 
 - **`RequestHandler`** – PSR-15 handler with program counter and label-based jumps
-- **`JumpMiddleware`** – conditional branch to a named label
+- **`JumpMiddleware`** – conditional branch to a named label (`else_label` for two-way branch)
 - **`LoopMiddleware`** – repeat a sub-handler while a condition holds
+- **`TryMiddleware`** – execute a sub-handler, jump to catch label on exception
 - **`LoopContext`** – mutable state container for loop iterations
 - **`RoutingMiddleware`** – path pattern matching with `{param}` placeholders, 404/405 aware
 - **`DispatchMiddleware`** – resolves and calls the matched handler via an injected resolver callable
@@ -100,6 +101,59 @@ Operators: `eq`, `neq`, `gt`, `gte`, `lt`, `lte`. Without an operator, truthy ch
 - **`IncrementMiddleware`** / **`DecrementMiddleware`** – numeric counters in request attributes
 - **`ConfigLoader`** – loads and validates `middleware.json`, standalone and cacheable
 - **`Emitter`** – sends PSR-7 responses to the SAPI with chunked streaming
+
+## Using third-party PSR-15 middleware
+
+Any PSR-15 compliant middleware works with Curlpit without modification or wrappers – including inside loops and try bodies. Curlpit's flow control state (`__pc`, `__jump_to`) travels in request attributes and is invisible to third-party middleware.
+
+### Static wiring (explicit)
+
+For middleware with complex constructor dependencies, wire them up in `instantiate()`:
+
+```php
+protected function instantiate(string $class, array $options): MiddlewareInterface
+{
+    return match ($class) {
+        \Middlewares\AccessLog::class => new AccessLog($this->buildLogger()),
+        default                       => parent::instantiate($class, $options),
+    };
+}
+```
+
+### Auto-wiring (declarative)
+
+For simpler cases, register type resolvers in your `Application` constructor and let Curlpit wire dependencies automatically via reflection:
+
+```php
+public function __construct(
+    ResponseFactoryInterface $responseFactory,
+    StreamFactoryInterface   $streamFactory,
+) {
+    parent::__construct($responseFactory, $streamFactory);
+
+    $this->registerResolver(
+        \Psr\Log\LoggerInterface::class,
+        fn(array $options) => (new Logger('app'))
+            ->pushHandler(new StreamHandler($options['path'] ?? 'logs/app.log'))
+    );
+}
+```
+
+Then in `middleware.json`, pass constructor arguments via `autowire`:
+
+```json
+{
+  "Middlewares\\AccessLog": {
+    "autowire": {
+      "logger": { "path": "logs/access.log" }
+    }
+  }
+}
+```
+
+The resolver receives the `autowire` sub-object for that parameter. `ResponseFactoryInterface` and `StreamFactoryInterface` are always resolved automatically without registration.
+
+> **Note:** Auto-wiring is experimental. The API may change in future versions.
 
 ## Example project
 
