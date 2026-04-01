@@ -1,6 +1,6 @@
 {
   "name": "curlpit/curlpit",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "A PSR-15 middleware orchestrator for PHP – with branching, looping, and declarative flow control built in",
   "type": "library",
   "license": "MIT",
