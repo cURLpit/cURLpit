@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Curlpit\App;
 
 use Curlpit\Core\ConfigLoader;
+use Curlpit\Core\ContainerResolver;
 use Curlpit\Core\LoopContext;
 use Curlpit\Core\RequestHandler;
 use Curlpit\Core\Middleware\JumpMiddleware;
@@ -28,7 +29,8 @@ class Application
     protected ResponseFactoryInterface $responseFactory;
     protected StreamFactoryInterface   $streamFactory;
 
-    private ?ConfigLoader $configLoader = null;
+    private ?ConfigLoader      $configLoader      = null;
+    private ?ContainerResolver $containerResolver = null;
 
     public function __construct(
         ResponseFactoryInterface $responseFactory,
@@ -66,13 +68,165 @@ class Application
     }
 
     /**
+     * Default container: container.json next to middleware.json.
+     * Override in subclass to change the path or return null to disable.
+     */
+    protected function defaultContainerResolver(): ?ContainerResolver
+    {
+        return null;
+    }
+
+    /**
      * Instantiate any middleware class.
      * Override in subclass to inject dependencies from a DI container.
      */
     protected function instantiate(string $class, array $options): MiddlewareInterface
     {
-        return new $class();
+        // ── EXPERIMENTAL: ContainerResolver + reflection-based auto-wiring ────
+        $resolver = $this->containerResolver ?? $this->defaultContainerResolver();
+        if ($resolver?->has($class)) {
+            $instance = $resolver->get($class);
+            if (!$instance instanceof MiddlewareInterface) {
+                throw new \RuntimeException("Resolved {$class} is not a MiddlewareInterface");
+            }
+            return $instance;
+        }
+        return $this->autowire($class, $options, $resolver);
+        // ── END EXPERIMENTAL ──────────────────────────────────────────────────
     }
+
+    // ── EXPERIMENTAL: auto-wiring via registerResolver ───────
+    //
+    // Allows any PSR-15 compliant middleware to be used directly
+    // from middleware.json without subclass instantiate() overrides.
+    //
+    // Usage in subclass constructor:
+    //   $this->registerResolver(
+    //       \Psr\Log\LoggerInterface::class,
+    //       fn(array $options) => (new Logger('app'))
+    //           ->pushHandler(new StreamHandler($options['path'] ?? 'logs/app.log'))
+    //   );
+    //
+    // Usage in middleware.json:
+    //   {
+    //     "Middlewares\\AccessLog": {
+    //       "autowire": { "logger": { "path": "logs/access.log" } }
+    //     }
+    //   }
+
+    /** @var array<string, callable(array): mixed> */
+    private array $resolvers = [];
+
+    public function registerResolver(string $type, callable $factory): void
+    {
+        $this->resolvers[$type] = $factory;
+    }
+
+    private function autowire(string $class, array $options, ?ContainerResolver $resolver = null): MiddlewareInterface
+    {
+        $ref  = new \ReflectionClass($class);
+        $ctor = $ref->getConstructor();
+        if (!$ctor) {
+            $instance = new $class();
+            foreach ($options['calls'] ?? [] as $call) {
+                $method   = $call[0];
+                $callArgs = $call[1] ?? [];
+                $tempResolver = $resolver ?? new ContainerResolver([], [
+                    \Psr\Http\Message\ResponseFactoryInterface::class => $this->responseFactory,
+                    \Psr\Http\Message\StreamFactoryInterface::class   => $this->streamFactory,
+                ]);
+                $resolvedArgs = array_map(fn($a) => is_array($a) ? $tempResolver->resolve($a) : $a, $callArgs);
+                $returned     = $instance->$method(...$resolvedArgs);
+                if (is_object($returned)) {
+                    $instance = $returned;
+                }
+            }
+            return $instance;
+        }
+
+        $autowire = $options['autowire'] ?? [];
+        $args     = [];
+
+        foreach ($ctor->getParameters() as $param) {
+            $name = $param->getName();
+            $type = $param->getType()?->getName();
+
+            // ContainerResolver
+            if ($type && $resolver?->has($type)) {
+                $args[] = $resolver->get($type);
+                continue;
+            }
+
+            // Registered resolver for this type
+            if ($type && isset($this->resolvers[$type])) {
+                $args[] = ($this->resolvers[$type])($autowire[$name] ?? []);
+                continue;
+            }
+
+            // Built-in PSR-17 factories
+            if ($type === \Psr\Http\Message\ResponseFactoryInterface::class) {
+                $args[] = $this->responseFactory;
+                continue;
+            }
+            if ($type === \Psr\Http\Message\StreamFactoryInterface::class) {
+                $args[] = $this->streamFactory;
+                continue;
+            }
+
+            // Scalar/object from autowire block
+            if (array_key_exists($name, $autowire)) {
+                $value = $autowire[$name];
+                if (is_array($value)) {
+                    $tempResolver = $resolver ?? new ContainerResolver([], [
+                        \Psr\Http\Message\ResponseFactoryInterface::class => $this->responseFactory,
+                        \Psr\Http\Message\StreamFactoryInterface::class   => $this->streamFactory,
+                    ]);
+                    $args[] = $tempResolver->resolve($value);
+                } else {
+                    $args[] = $value;
+                }
+                continue;
+            }
+
+            // Scalar from options
+            if (array_key_exists($name, $options)) {
+                $args[] = $options[$name];
+                continue;
+            }
+
+            // Optional parameter – use default
+            if ($param->isOptional()) {
+                $args[] = $param->getDefaultValue();
+                continue;
+            }
+
+            throw new \RuntimeException(
+                "Cannot resolve parameter \${$name} (type: {$type}) for {$class}. " .
+                "Add a definition to container.json, register a resolver via registerResolver(), " .
+                "or add it to 'autowire' in middleware.json."
+            );
+        }
+
+        $instance = $ref->newInstanceArgs($args);
+
+        // Apply method calls if defined in options
+        foreach ($options['calls'] ?? [] as $call) {
+            $method     = $call[0];
+            $callArgs   = $call[1] ?? [];
+            $tempResolver = $resolver ?? new ContainerResolver([], [
+                \Psr\Http\Message\ResponseFactoryInterface::class => $this->responseFactory,
+                \Psr\Http\Message\StreamFactoryInterface::class   => $this->streamFactory,
+            ]);
+            $resolvedArgs = array_map(fn($a) => is_array($a) ? $tempResolver->resolve($a) : $a, $callArgs);
+            $returned     = $instance->$method(...$resolvedArgs);
+            if (is_object($returned)) {
+                $instance = $returned;
+            }
+        }
+
+        return $instance;
+    }
+    // ── END EXPERIMENTAL ──────────────────────────────────────
 
     // ── Builder ──────────────────────────────────────────────
 
@@ -87,6 +241,7 @@ class Application
                     new JumpMiddleware(
                         $this->buildCondition($options['condition'] ?? []),
                         $options['jump_to_label'],
+                        $options['else_label'] ?? null,
                     ),
                     $label,
                 );
@@ -107,6 +262,23 @@ class Application
                         $rf,
                         $sf,
                         $maxIterations,
+                    ),
+                    $label,
+                );
+                continue;
+            }
+
+            if ($class === \Curlpit\Core\Middleware\TryMiddleware::class) {
+                $bodyMiddleware = $options['body']['middleware'] ?? [];
+                $bodyStack      = ConfigLoader::fromArray($bodyMiddleware)->getStack();
+                $catchLabel     = $options['catch_label'];
+                $catchTypes     = $options['catch_types'] ?? [];
+
+                $handler->add(
+                    new \Curlpit\Core\Middleware\TryMiddleware(
+                        fn() => $this->buildHandler($bodyStack),
+                        $catchLabel,
+                        $catchTypes,
                     ),
                     $label,
                 );
