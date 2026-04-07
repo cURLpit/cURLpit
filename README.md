@@ -120,40 +120,68 @@ protected function instantiate(string $class, array $options): MiddlewareInterfa
 }
 ```
 
-### Auto-wiring (declarative)
+## Autowiring
 
-For simpler cases, register type resolvers in your `Application` constructor and let Curlpit wire dependencies automatically via reflection:
+Curlpit now supports **fully declarative middleware configuration** via `middleware.json`.
 
-```php
-public function __construct(
-    ResponseFactoryInterface $responseFactory,
-    StreamFactoryInterface   $streamFactory,
-) {
-    parent::__construct($responseFactory, $streamFactory);
+For simpler cases, there is **no need to register or wire anything in your application code**.  
+All dependencies, configuration values, and even method calls can be defined in a single place.
 
-    $this->registerResolver(
-        \Psr\Log\LoggerInterface::class,
-        fn(array $options) => (new Logger('app'))
-            ->pushHandler(new StreamHandler($options['path'] ?? 'logs/app.log'))
-    );
-}
+---
+
+### Example
+
+Install any PSR-15 middleware:
+
+```bash
+composer require middlewares/http-authentication
+composer require middlewares/access-log monolog/monolog
 ```
 
-Then in `middleware.json`, pass constructor arguments via `autowire`:
+Generate a password hash:
+
+```bash
+php -r "echo password_hash('your password', PASSWORD_DEFAULT);"
+```
+
+Define everything in `middleware.json`:
 
 ```json
 {
-  "Middlewares\\AccessLog": {
-    "autowire": {
-      "logger": { "path": "logs/access.log" }
+  "middleware": [
+    {
+      "Middlewares\\AccessLog": {
+        "autowire": {
+          "logger": {
+            "class": "Monolog\\Logger",
+            "args": [
+              "access",
+              [
+                {
+                  "class": "Monolog\\Handler\\StreamHandler",
+                  "args": ["../logs/access.log", 200]
+                }
+              ]
+            ]
+          }
+        }
+      }
+    },
+    {
+      "Middlewares\\BasicAuthentication": {
+        "autowire": {
+          "users": { "admin": "$2y$12$abc123..." }
+        },
+        "calls": [["verifyHash", []]]
+      }
     }
-  }
+  ]
 }
 ```
 
-The resolver receives the `autowire` sub-object for that parameter. `ResponseFactoryInterface` and `StreamFactoryInterface` are always resolved automatically without registration.
+And that's it.
 
-> **Note:** Auto-wiring is experimental. The API may change in future versions.
+> **Note:** Autowiring is experimental. The API may change in future versions.
 
 ## Example project
 
